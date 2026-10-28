@@ -24,13 +24,65 @@ use ratatui::style::{Color, Modifier};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// Borrowed destination, shared by every visible fragment of a token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkTarget<'a> {
+    Url(&'a str),
+    GitHub {
+        repository: &'a str,
+        number: &'a str,
+    },
+}
+
+impl LinkTarget<'_> {
+    fn write_to<W: Write>(self, writer: &mut W) -> io::Result<()> {
+        match self {
+            Self::Url(url) => writer.write_all(url.as_bytes()),
+            Self::GitHub { repository, number } => {
+                write!(writer, "https://github.com/{repository}/issues/{number}")
+            }
+        }
+    }
+}
+
+/// Resolve complete whitespace tokens only; punctuation is not stripped.
+/// HTTP(S) recognition deliberately retains its existing prefix semantics.
+pub fn link_target(token: &str) -> Option<LinkTarget<'_>> {
+    if token.starts_with("http://") || token.starts_with("https://") {
+        return Some(LinkTarget::Url(token));
+    }
+    let (repository, number) = token.split_once('#')?;
+    let (owner, repo) = repository.split_once('/')?;
+    if owner.is_empty()
+        || owner.len() > 39
+        || !owner.as_bytes().first()?.is_ascii_alphanumeric()
+        || !owner.as_bytes().last()?.is_ascii_alphanumeric()
+        || owner.contains("--")
+        || !owner
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        || repo.is_empty()
+        || repo.len() > 100
+        || matches!(repo, "." | "..")
+        || !repo
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+        || number.is_empty()
+        || !number.bytes().all(|c| c.is_ascii_digit())
+        || !number.bytes().any(|c| c != b'0')
+    {
+        return None;
+    }
+    Some(LinkTarget::GitHub { repository, number })
+}
+
 /// One run of underlined cells, captured for re-emission with OSC 8.
 #[derive(Debug, Clone)]
 pub struct UrlRun<'a> {
     pub x: u16,
     pub y: u16,
     pub text: String,
-    pub target: Option<&'a str>,
+    pub target: Option<LinkTarget<'a>>,
     pub fg: Color,
     pub bg: Color,
     pub modifier: Modifier,
@@ -41,8 +93,55 @@ pub struct UrlTarget<'a> {
     pub x: u16,
     pub y: u16,
     pub text: &'a str,
-    pub target: &'a str,
+    pub target: LinkTarget<'a>,
     pub style: Style,
+}
+
+/// Annotate borrowed link spans before drawing, retaining their full target
+/// when a pane clips them or a later popup covers only part of the token.
+pub fn line_targets<'a>(
+    lines: &[ratatui::text::Line<'a>],
+    area: ratatui::layout::Rect,
+    scroll: u16,
+    base: Style,
+) -> Vec<UrlTarget<'a>> {
+    let mut targets = Vec::new();
+    for (row, line) in lines.iter().skip(usize::from(scroll)).enumerate() {
+        if row >= usize::from(area.height) {
+            break;
+        }
+        let mut column = 0;
+        for span in &line.spans {
+            if column >= usize::from(area.width) {
+                break;
+            }
+            let style = base.patch(line.style).patch(span.style);
+            if style.add_modifier.contains(Modifier::UNDERLINED)
+                && let std::borrow::Cow::Borrowed(text) = span.content
+                && let Some(target) = link_target(text)
+            {
+                let mut width = 0;
+                let end = text
+                    .grapheme_indices(true)
+                    .find_map(|(byte, grapheme)| {
+                        width += grapheme.width();
+                        (column + width > usize::from(area.width)).then_some(byte)
+                    })
+                    .unwrap_or(text.len());
+                if end > 0 {
+                    targets.push(UrlTarget {
+                        x: area.x + column as u16,
+                        y: area.y + row as u16,
+                        text: &text[..end],
+                        target,
+                        style,
+                    });
+                }
+            }
+            column += span.width();
+        }
+    }
+    targets
 }
 
 /// Match surviving URL cells after overlays, including suffixes left behind by
@@ -88,10 +187,9 @@ pub fn collect_with_targets<'a>(buf: &Buffer, targets: &[UrlTarget<'a>]) -> Vec<
 }
 
 /// Scan `buf` for horizontal runs of cells carrying [`Modifier::UNDERLINED`].
-/// The visible text of each run is used as its link target — URL tokens are
-/// the only thing that carries the underline modifier in this codebase, so the
-/// run text *is* the URL. Style comes from the run's first cell; spans of one
-/// URL token share a single style by construction.
+/// Unannotated runs resolve their complete visible token during emission.
+/// Annotated fragments instead retain the full borrowed destination, even
+/// when overlays or wide graphemes split the visible text.
 pub fn collect<'a>(buf: &Buffer) -> Vec<UrlRun<'a>> {
     let area = buf.area;
     let mut runs = Vec::new();
@@ -150,7 +248,13 @@ pub fn emit_overlay<W: Write>(writer: &mut W, runs: &[UrlRun<'_>]) -> io::Result
         write_sgr_fg(writer, run.fg)?;
         write_sgr_bg(writer, run.bg)?;
         write_sgr_modifier(writer, run.modifier)?;
-        write!(writer, "\x1b]8;;{}\x1b\\", run.target.unwrap_or(&run.text))?;
+        writer.write_all(b"\x1b]8;;")?;
+        if let Some(target) = run.target.or_else(|| link_target(&run.text)) {
+            target.write_to(writer)?;
+        } else {
+            writer.write_all(run.text.as_bytes())?;
+        }
+        writer.write_all(b"\x1b\\")?;
         writer.write_all(run.text.as_bytes())?;
         writer.write_all(b"\x1b]8;;\x1b\\")?;
         writer.write_all(b"\x1b[0m")?;
@@ -238,6 +342,57 @@ mod tests {
 
     fn paint(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
         buf.set_string(x, y, text, style);
+    }
+
+    #[test]
+    fn reference_resolver_preserves_valid_spelling_and_http_targets() {
+        for reference in [
+            "phenome/tuxedo#173",
+            "A-b/r_e.po-1#001",
+            "o/r#999999999999999999999",
+        ] {
+            let (repository, number) = reference.split_once('#').unwrap();
+            assert_eq!(
+                link_target(reference),
+                Some(LinkTarget::GitHub { repository, number })
+            );
+        }
+        for url in [
+            "https://github.com/phenome/tuxedo#173",
+            "http://example.com/界#173",
+        ] {
+            assert_eq!(link_target(url), Some(LinkTarget::Url(url)));
+        }
+    }
+
+    #[test]
+    fn reference_overlay_links_only_matching_surviving_text_and_style() {
+        let reference = "phenome/tuxedo#173";
+        let style = Style::default()
+            .fg(Color::Blue)
+            .bg(Color::Black)
+            .add_modifier(Modifier::UNDERLINED);
+        let targets = [UrlTarget {
+            x: 2,
+            y: 0,
+            text: reference,
+            target: link_target(reference).unwrap(),
+            style,
+        }];
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        paint(&mut buf, 2, 0, reference, style);
+        paint(&mut buf, 2, 0, "overlay!", style.fg(Color::Red));
+        let runs = collect_with_targets(&buf, &targets);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "tuxedo#173");
+        let mut bytes = Vec::new();
+        emit_overlay(&mut bytes, &runs).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        assert!(output.contains(
+            "\x1b]8;;https://github.com/phenome/tuxedo/issues/173\x1b\\tuxedo#173\x1b]8;;\x1b\\"
+        ));
+        paint(&mut buf, 2, 0, "not-ref!", style);
+        assert!(collect_with_targets(&buf, &targets).is_empty());
     }
 
     #[test]
@@ -363,7 +518,7 @@ mod tests {
             x: 2,
             y: 0,
             text: url,
-            target: url,
+            target: LinkTarget::Url(url),
             style,
         }];
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
@@ -373,7 +528,7 @@ mod tests {
         let runs = collect_with_targets(&buf, &targets);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, &url[8..]);
-        assert_eq!(runs[0].target, Some(url));
+        assert_eq!(runs[0].target, Some(LinkTarget::Url(url)));
 
         paint(&mut buf, 2, 0, "not-url!", style);
         assert!(

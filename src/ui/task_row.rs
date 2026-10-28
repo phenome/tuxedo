@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 use crate::search::subseq_match_ci;
 use crate::theme::Theme;
 use crate::todo::{Task, body_after_priority};
+use crate::ui::hyperlinks::link_target;
 
 #[derive(Clone, Copy, Default)]
 pub struct RowOpts<'a> {
@@ -21,7 +22,7 @@ pub struct RowOpts<'a> {
     pub hidden_keys: &'a [String],
 }
 
-pub fn build_line<'a>(task: &'a Task, opts: RowOpts<'a>, theme: &Theme) -> Line<'a> {
+pub fn build_line<'a>(task: &'a Task, opts: RowOpts<'_>, theme: &Theme) -> Line<'a> {
     let mut spans: Vec<Span<'a>> = Vec::new();
 
     if opts.show_line_num {
@@ -150,7 +151,7 @@ fn push_token_spans<'a>(
     token_offset_in_body: usize,
     body_match_positions: Option<&[usize]>,
     task: &Task,
-    opts: RowOpts<'a>,
+    opts: RowOpts<'_>,
     theme: &Theme,
 ) {
     if let Some(c) = sigil_token_color(token, task, theme) {
@@ -164,10 +165,8 @@ fn push_token_spans<'a>(
         ));
         return;
     }
-    // URLs are picked off before the generic key:value branch — `http:` would
-    // otherwise classify as a lowercase key and steal the underline + accent
-    // styling that doubles as the OSC 8 hyperlink marker (see `ui::hyperlinks`).
-    if is_url_token(token) {
+    // Links precede generic key:value styling so HTTP(S) retains its underline.
+    if link_target(token).is_some() {
         spans.push(Span::styled(token, url_token_style(task.done, theme)));
         return;
     }
@@ -243,10 +242,6 @@ fn is_hidden_kv(token: &str, hidden_keys: &[String]) -> bool {
         }
         _ => false,
     }
-}
-
-pub(crate) fn is_url_token(token: &str) -> bool {
-    token.starts_with("http://") || token.starts_with("https://")
 }
 
 pub(crate) fn url_token_style(task_done: bool, theme: &Theme) -> Style {

@@ -9,7 +9,11 @@ use crate::core::filter;
 use crate::theme::Theme;
 use crate::ui::{header, keep_cursor_visible, task_row};
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render<'a>(
+    frame: &mut Frame,
+    area: Rect,
+    app: &'a App,
+) -> Vec<super::hyperlinks::UrlTarget<'a>> {
     let theme = app.theme();
     super::fill_bg(frame, area, Style::default().bg(theme.bg));
 
@@ -41,7 +45,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         if app.mode != Mode::Welcome {
             crate::ui::empty::render(frame, body_area, app);
         }
-        return;
+        return Vec::new();
     }
 
     // Highlight only the free-text part — a `due:` term filters by date and
@@ -113,10 +117,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
     scroll_cell.set(scroll);
 
+    let targets = super::hyperlinks::line_targets(
+        &lines,
+        body_area,
+        scroll,
+        Style::default().bg(theme.bg).fg(theme.fg),
+    );
     let para = Paragraph::new(lines)
         .style(Style::default().bg(theme.bg).fg(theme.fg))
         .scroll((scroll, 0));
     frame.render_widget(para, body_area);
+    targets
 }
 
 fn display_path(p: &std::path::Path) -> String {

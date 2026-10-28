@@ -498,6 +498,15 @@ Standard [todo.txt](https://github.com/todotxt/todo.txt) lines:
   wrapped values, including `key:"values with spaces"`. Long labels are
   ellipsized. HTTP(S) URLs such as `link:https://example.com` are clickable
   in terminals supporting OSC 8, even when wrapped across lines.
+- GitHub references such as `phenome/tuxedo#173` are clickable in task lists
+  (including the archive), RAW details, and metadata values such as
+  `link:phenome/tuxedo#173`. Displayed text is unchanged; links open
+  `https://github.com/phenome/tuxedo/issues/173` (GitHub also routes pull requests).
+  Wrapped metadata fragments all retain that full destination. References must
+  be complete whitespace-delimited tokens: an ASCII GitHub owner/repository
+  and a positive ASCII issue number. Surrounding punctuation is not stripped;
+  `(phenome/tuxedo#173)`, `phenome/tuxedo#173,`, extra path segments, and bare
+  `#173` remain plain text. No repository inference or network lookup is used.
 - `due:` in the `/`-search box also accepts a range, using the same offset
   grammar as `rec:` and `t:`: `due:+1w` matches anything due between today
   and 7 days from now, `due:-3d` matches anything due between 3 days ago and

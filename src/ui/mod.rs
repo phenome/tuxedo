@@ -86,13 +86,13 @@ pub fn draw<'a>(frame: &mut Frame, app: &'a App) -> Vec<hyperlinks::UrlRun<'a>> 
     if let Some(la) = left_area {
         filters::render(frame, la, app);
     }
-    match app.view() {
+    let mut targets = match app.view() {
         View::List => list::render(frame, center_area, app),
         View::Archive => archive::render(frame, center_area, app),
+    };
+    if let Some(ra) = right_area {
+        targets.extend(detail::render(frame, ra, app));
     }
-    let targets = right_area
-        .map(|ra| detail::render(frame, ra, app))
-        .unwrap_or_default();
 
     if app.prefs.layout.status_bar {
         if app.mode == Mode::Search {

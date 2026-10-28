@@ -9,8 +9,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 use crate::theme::Theme;
 use crate::todo::Task;
-use crate::ui::hyperlinks::UrlTarget;
-use crate::ui::task_row::{due_label, due_token_style, is_url_token, url_token_style};
+use crate::ui::hyperlinks::{LinkTarget, UrlTarget, link_target};
+use crate::ui::task_row::{due_label, due_token_style, url_token_style};
 
 pub fn render<'a>(frame: &mut Frame, area: Rect, app: &'a App) -> Vec<UrlTarget<'a>> {
     let theme = app.theme();
@@ -20,6 +20,12 @@ pub fn render<'a>(frame: &mut Frame, area: Rect, app: &'a App) -> Vec<UrlTarget<
     // Keep both padding cells inside even very narrow panes.
     let wrap_w = (area.width as usize).saturating_sub(2);
     let (lines, mut targets) = build_lines(theme, task, app.today(), wrap_w);
+    targets.extend(super::hyperlinks::line_targets(
+        &lines,
+        Rect::new(0, 0, area.width, area.height),
+        0,
+        Style::default().bg(theme.panel).fg(theme.fg),
+    ));
     let para = Paragraph::new(lines).style(Style::default().bg(theme.panel).fg(theme.fg));
     frame.render_widget(para, area);
     targets.retain(|target| target.y < area.height);
@@ -227,7 +233,7 @@ fn style_raw_token<'a>(
     if let Some(rest) = token.strip_prefix("due:") {
         return Span::styled(token, due_token_style(task.done, rest, today, theme));
     }
-    if is_url_token(token) {
+    if link_target(token).is_some() {
         return Span::styled(token, url_token_style(task.done, theme));
     }
     if token.len() > 1 && token.starts_with('+') {
@@ -292,7 +298,7 @@ fn custom_metadata(mut raw: &str) -> Vec<(&str, &str)> {
         };
         if crate::todo::is_valid_key(key)
             && !value.is_empty()
-            && !is_url_token(token)
+            && !matches!(link_target(token), Some(LinkTarget::Url(_)))
             && !["due", "rec", "t", "note"]
                 .iter()
                 .any(|reserved| key.eq_ignore_ascii_case(reserved))
@@ -351,8 +357,8 @@ fn append_value<'a>(
                 used += 1;
             }
         }
-        let link = is_url_token(word);
-        let style = if link {
+        let target = link_target(word);
+        let style = if target.is_some() {
             url_token_style(done, theme)
         } else {
             Style::default().fg(theme.fg)
@@ -369,8 +375,7 @@ fn append_value<'a>(
                         &mut spans,
                         targets,
                         &word[start..offset],
-                        word,
-                        link,
+                        target,
                         style,
                         used,
                         rows.len(),
@@ -382,7 +387,7 @@ fn append_value<'a>(
                         std::mem::replace(&mut spans, vec![Span::raw(" ")]),
                     ));
                 }
-                push_fragment(&mut spans, targets, "…", word, link, style, 0, rows.len());
+                push_fragment(&mut spans, targets, "…", target, style, 0, rows.len());
                 used = 1;
                 start = offset + grapheme.len();
                 fragment_width = 0;
@@ -394,8 +399,7 @@ fn append_value<'a>(
                     &mut spans,
                     targets,
                     fragment,
-                    word,
-                    link,
+                    target,
                     style,
                     used,
                     rows.len(),
@@ -415,8 +419,7 @@ fn append_value<'a>(
             &mut spans,
             targets,
             fragment,
-            word,
-            link,
+            target,
             style,
             used,
             rows.len(),
@@ -433,8 +436,7 @@ fn push_fragment<'a>(
     spans: &mut Vec<Span<'a>>,
     targets: &mut Vec<UrlTarget<'a>>,
     fragment: &'a str,
-    word: &'a str,
-    link: bool,
+    target: Option<LinkTarget<'a>>,
     style: Style,
     used: usize,
     row: usize,
@@ -442,12 +444,12 @@ fn push_fragment<'a>(
     if fragment.is_empty() {
         return;
     }
-    if link {
+    if let Some(target) = target {
         targets.push(UrlTarget {
             x: (used + 1) as u16,
             y: row as u16,
             text: fragment,
-            target: word,
+            target,
             style,
         });
     }
@@ -461,6 +463,133 @@ mod tests {
     use crate::config::Config;
     use crate::ui::hyperlinks;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn real_draw_bare_reference_links_list_and_raw_without_changing_text() {
+        let reference = "phenome/tuxedo#173";
+        let mut app = App::new(
+            "/tmp/tuxedo-reference-bare.txt".into(),
+            format!("Task {reference}"),
+            "2026-10-28".into(),
+            Config::default(),
+        );
+        app.prefs.layout.right = true;
+        let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        let mut runs = Vec::new();
+        terminal
+            .draw(|frame| runs = crate::ui::draw(frame, &app))
+            .unwrap();
+        assert_eq!(runs.len(), 2, "list row and RAW detail must both link");
+        assert!(runs.iter().all(|run| run.text == reference));
+        let mut bytes = Vec::new();
+        hyperlinks::emit_overlay(&mut bytes, &runs).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            output
+                .matches("\x1b]8;;https://github.com/phenome/tuxedo/issues/173\x1b\\")
+                .count(),
+            2
+        );
+        assert_eq!(
+            output.matches("phenome/tuxedo#173\x1b]8;;\x1b\\").count(),
+            2
+        );
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| !cell.symbol().contains('\x1b'))
+        );
+    }
+
+    #[test]
+    fn real_draw_rejects_invalid_reference_tokens_on_every_surface() {
+        for token in [
+            "#173",
+            "phenome/tuxedo#0",
+            "phenome/tuxedo#000",
+            "phenome/tuxedo#١٧٣",
+            "phenome/tuxedo#１２３",
+            "phenome/tuxedo#-1",
+            "phenome/tuxedo#1x",
+            "phenome/tuxedo#1#2",
+            "a/b/c#173",
+            "./phenome/tuxedo#173",
+            "/phenome/tuxedo#173",
+            "x!phenome/tuxedo#173",
+            "(phenome/tuxedo#173)",
+            "phenome/tuxedo#173,",
+            "phenome//tuxedo#173",
+            "-owner/repo#1",
+            "owner-/repo#1",
+            "own--er/repo#1",
+            "owner/..#1",
+            "owner/#1",
+            "/repo#1",
+            "owner/repo#",
+            "é/repo#1",
+        ] {
+            let mut app = App::new(
+                "/tmp/tuxedo-reference-invalid.txt".into(),
+                format!("Task {token} link:{token}"),
+                "2026-10-28".into(),
+                Config::default(),
+            );
+            app.prefs.layout.right = true;
+            let mut terminal = Terminal::new(TestBackend::new(160, 60)).unwrap();
+            let mut runs = Vec::new();
+            terminal
+                .draw(|frame| runs = crate::ui::draw(frame, &app))
+                .unwrap();
+            assert!(runs.is_empty(), "invalid token linked: {token}");
+            let mut bytes = Vec::new();
+            hyperlinks::emit_overlay(&mut bytes, &runs).unwrap();
+            assert!(bytes.is_empty());
+        }
+    }
+
+    #[test]
+    fn wrapped_reference_metadata_keeps_canonical_target_under_help() {
+        let reference = "phenome/tuxedo-with-a-long-repository-name#173";
+        let canonical = "https://github.com/phenome/tuxedo-with-a-long-repository-name/issues/173";
+        let mut app = App::new(
+            "/tmp/tuxedo-reference-wrapped.txt".into(),
+            format!("Task link:{reference}"),
+            "2026-10-28".into(),
+            Config::default(),
+        );
+        app.prefs.layout.right = true;
+        for mode in [crate::app::Mode::Normal, crate::app::Mode::Help] {
+            app.mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
+            let mut runs = Vec::new();
+            terminal
+                .draw(|frame| runs = crate::ui::draw(frame, &app))
+                .unwrap();
+            assert!(!runs.is_empty(), "no surviving reference in {mode:?}");
+            assert!(runs.iter().all(|run| run.target == link_target(reference)));
+            if mode == crate::app::Mode::Normal {
+                assert!(runs.len() >= 2);
+                assert_eq!(
+                    runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+                    reference
+                );
+            } else {
+                assert!(runs.iter().all(|run| !run.text.starts_with("phenome/")));
+            }
+            let mut bytes = Vec::new();
+            hyperlinks::emit_overlay(&mut bytes, &runs).unwrap();
+            let output = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                output
+                    .matches(&format!("\x1b]8;;{canonical}\x1b\\"))
+                    .count(),
+                runs.len()
+            );
+        }
+    }
 
     #[test]
     fn metadata_preserves_quoted_values_and_excludes_builtins_and_urls() {
@@ -538,7 +667,10 @@ mod tests {
         terminal
             .draw(|frame| runs = crate::ui::draw(frame, &app))
             .unwrap();
-        let fragments: Vec<_> = runs.iter().filter(|run| run.target == Some(url)).collect();
+        let fragments: Vec<_> = runs
+            .iter()
+            .filter(|run| run.target == Some(LinkTarget::Url(url)))
+            .collect();
         assert!(fragments.len() >= 2);
         assert_eq!(
             fragments
@@ -579,7 +711,10 @@ mod tests {
                 .draw(|frame| runs = crate::ui::draw(frame, &app))
                 .unwrap();
             assert!(!runs.is_empty(), "expected surviving URL cells in {mode:?}");
-            assert!(runs.iter().all(|run| run.target == Some(url)));
+            assert!(
+                runs.iter()
+                    .all(|run| run.target == Some(LinkTarget::Url(url)))
+            );
             if mode == crate::app::Mode::Normal {
                 assert_eq!(
                     runs.iter().map(|run| run.text.as_str()).collect::<String>(),
