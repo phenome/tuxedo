@@ -46,7 +46,7 @@ const PALETTE_MAX_H: u16 = 20;
 const PALETTE_MIN_W: u16 = 50;
 const PALETTE_MAX_W: u16 = 80;
 
-pub fn draw(frame: &mut Frame, app: &App) -> Vec<hyperlinks::UrlRun> {
+pub fn draw<'a>(frame: &mut Frame, app: &'a App) -> Vec<hyperlinks::UrlRun<'a>> {
     let theme = app.theme();
     let area = frame.area();
 

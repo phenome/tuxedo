@@ -12,7 +12,7 @@ use crate::todo::Task;
 use crate::ui::hyperlinks::UrlTarget;
 use crate::ui::task_row::{due_label, due_token_style, is_url_token, url_token_style};
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) -> Vec<UrlTarget> {
+pub fn render<'a>(frame: &mut Frame, area: Rect, app: &'a App) -> Vec<UrlTarget<'a>> {
     let theme = app.theme();
     super::fill_bg(frame, area, Style::default().bg(theme.panel));
 
@@ -35,7 +35,7 @@ fn build_lines<'a>(
     task: Option<&'a Task>,
     today: &'a str,
     wrap_w: usize,
-) -> (Vec<Line<'a>>, Vec<UrlTarget>) {
+) -> (Vec<Line<'a>>, Vec<UrlTarget<'a>>) {
     let mut rows: Vec<Line> = Vec::new();
     let mut targets = Vec::new();
     rows.push(line_panel(
@@ -327,7 +327,7 @@ fn ellipsize(label: &str, width: usize) -> String {
 
 fn append_value<'a>(
     rows: &mut Vec<Line<'a>>,
-    targets: &mut Vec<UrlTarget>,
+    targets: &mut Vec<UrlTarget<'a>>,
     value: &'a str,
     width: usize,
     theme: &Theme,
@@ -356,7 +356,8 @@ fn append_value<'a>(
             url_token_style(done, theme)
         } else {
             Style::default().fg(theme.fg)
-        };
+        }
+        .bg(theme.panel);
         let mut start = 0;
         let mut fragment_width = 0;
         for (offset, grapheme) in word.grapheme_indices(true) {
@@ -430,9 +431,9 @@ fn append_value<'a>(
 #[allow(clippy::too_many_arguments)]
 fn push_fragment<'a>(
     spans: &mut Vec<Span<'a>>,
-    targets: &mut Vec<UrlTarget>,
+    targets: &mut Vec<UrlTarget<'a>>,
     fragment: &'a str,
-    word: &str,
+    word: &'a str,
     link: bool,
     style: Style,
     used: usize,
@@ -445,8 +446,9 @@ fn push_fragment<'a>(
         targets.push(UrlTarget {
             x: (used + 1) as u16,
             y: row as u16,
-            text: fragment.to_owned(),
-            target: word.to_owned(),
+            text: fragment,
+            target: word,
+            style,
         });
     }
     spans.push(Span::styled(fragment, style));
@@ -536,10 +538,7 @@ mod tests {
         terminal
             .draw(|frame| runs = crate::ui::draw(frame, &app))
             .unwrap();
-        let fragments: Vec<_> = runs
-            .iter()
-            .filter(|run| run.target.as_deref() == Some(url))
-            .collect();
+        let fragments: Vec<_> = runs.iter().filter(|run| run.target == Some(url)).collect();
         assert!(fragments.len() >= 2);
         assert_eq!(
             fragments
@@ -560,5 +559,43 @@ mod tests {
         assert!(visible.contains("owner"));
         assert!(visible.contains("alice"));
         assert!(visible.contains("link"));
+    }
+
+    #[test]
+    fn unicode_links_keep_full_targets_when_help_obscures_their_prefixes() {
+        let url = "https://example.com/界/long/path/that/must/wrap";
+        let mut app = App::new(
+            "/tmp/tuxedo-detail-unicode-links.txt".into(),
+            format!("Task link:{url}"),
+            "2026-10-28".into(),
+            Config::default(),
+        );
+        app.prefs.layout.right = true;
+        for mode in [crate::app::Mode::Normal, crate::app::Mode::Help] {
+            app.mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
+            let mut runs = Vec::new();
+            terminal
+                .draw(|frame| runs = crate::ui::draw(frame, &app))
+                .unwrap();
+            assert!(!runs.is_empty(), "expected surviving URL cells in {mode:?}");
+            assert!(runs.iter().all(|run| run.target == Some(url)));
+            if mode == crate::app::Mode::Normal {
+                assert_eq!(
+                    runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+                    url
+                );
+                assert!(runs.iter().any(|run| run.text.contains('界')));
+            } else {
+                assert!(runs.iter().all(|run| !run.text.starts_with("https://")));
+            }
+            let mut bytes = Vec::new();
+            hyperlinks::emit_overlay(&mut bytes, &runs).unwrap();
+            let output = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                output.matches(&format!("\x1b]8;;{url}\x1b\\")).count(),
+                runs.len()
+            );
+        }
     }
 }

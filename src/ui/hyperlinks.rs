@@ -19,40 +19,71 @@
 use std::io::{self, Write};
 
 use ratatui::buffer::Buffer;
+use ratatui::style::Style;
 use ratatui::style::{Color, Modifier};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// One run of underlined cells, captured for re-emission with OSC 8.
 #[derive(Debug, Clone)]
-pub struct UrlRun {
+pub struct UrlRun<'a> {
     pub x: u16,
     pub y: u16,
     pub text: String,
-    pub target: Option<String>,
+    pub target: Option<&'a str>,
     pub fg: Color,
     pub bg: Color,
     pub modifier: Modifier,
 }
 
 /// Full URL associated with a displayed (possibly wrapped) fragment.
-pub struct UrlTarget {
+pub struct UrlTarget<'a> {
     pub x: u16,
     pub y: u16,
-    pub text: String,
-    pub target: String,
+    pub text: &'a str,
+    pub target: &'a str,
+    pub style: Style,
 }
 
-/// Resolve explicit fragment targets only when the final buffer still contains
-/// that fragment. A dialog painted over the detail pane must not gain its links.
-pub fn collect_with_targets(buf: &Buffer, targets: &[UrlTarget]) -> Vec<UrlRun> {
+/// Match surviving URL cells after overlays, including suffixes left behind by
+/// a popup and runs split by a wide grapheme's unstyled continuation cell.
+/// Both text and style must still agree with the original annotated fragment.
+pub fn collect_with_targets<'a>(buf: &Buffer, targets: &[UrlTarget<'a>]) -> Vec<UrlRun<'a>> {
     let mut runs = collect(buf);
-    for run in &mut runs {
-        if let Some(target) = targets
-            .iter()
-            .find(|target| target.x == run.x && target.y == run.y && target.text == run.text)
-        {
-            run.target = Some(target.target.clone());
+    runs.retain_mut(|run| {
+        let mut annotated = false;
+        for target in targets {
+            if run.y != target.y
+                || run.x >= target.x.saturating_add(target.text.width() as u16)
+                || run.x.saturating_add(run.text.width() as u16) <= target.x
+            {
+                continue;
+            }
+            annotated = true;
+            if run.x < target.x
+                || target.style.fg != Some(run.fg)
+                || target.style.bg != Some(run.bg)
+                || target.style.add_modifier != run.modifier
+            {
+                continue;
+            }
+            let offset = usize::from(run.x - target.x);
+            let mut column = 0;
+            for (byte, grapheme) in target.text.grapheme_indices(true) {
+                if column == offset && target.text[byte..].starts_with(&run.text) {
+                    run.target = Some(target.target);
+                    return true;
+                }
+                column += grapheme.width();
+                if column > offset {
+                    break;
+                }
+            }
         }
-    }
+        // Never turn an obscured/mismatched metadata fragment into a link to
+        // its visible suffix, nor assign its target to replacement popup text.
+        !annotated
+    });
     runs
 }
 
@@ -61,7 +92,7 @@ pub fn collect_with_targets(buf: &Buffer, targets: &[UrlTarget]) -> Vec<UrlRun> 
 /// the only thing that carries the underline modifier in this codebase, so the
 /// run text *is* the URL. Style comes from the run's first cell; spans of one
 /// URL token share a single style by construction.
-pub fn collect(buf: &Buffer) -> Vec<UrlRun> {
+pub fn collect<'a>(buf: &Buffer) -> Vec<UrlRun<'a>> {
     let area = buf.area;
     let mut runs = Vec::new();
     for y in area.top()..area.bottom() {
@@ -85,7 +116,7 @@ pub fn collect(buf: &Buffer) -> Vec<UrlRun> {
             while x < area.right()
                 && buf
                     .cell((x, y))
-                    .is_some_and(|c| c.modifier.contains(Modifier::UNDERLINED))
+                    .is_some_and(|c| c.modifier == modifier && c.fg == fg && c.bg == bg)
             {
                 if let Some(c) = buf.cell((x, y)) {
                     text.push_str(c.symbol());
@@ -111,7 +142,7 @@ pub fn collect(buf: &Buffer) -> Vec<UrlRun> {
 /// (fg/bg/modifier — ratatui's last `Reset` emission cleared them), wrap the
 /// run's text with OSC 8 open/close, and reset state so the next frame's diff
 /// starts from a known baseline.
-pub fn emit_overlay<W: Write>(writer: &mut W, runs: &[UrlRun]) -> io::Result<()> {
+pub fn emit_overlay<W: Write>(writer: &mut W, runs: &[UrlRun<'_>]) -> io::Result<()> {
     for run in runs {
         // CUP is 1-indexed; ratatui cell coordinates are 0-indexed.
         write!(writer, "\x1b[{};{}H", run.y + 1, run.x + 1)?;
@@ -119,11 +150,7 @@ pub fn emit_overlay<W: Write>(writer: &mut W, runs: &[UrlRun]) -> io::Result<()>
         write_sgr_fg(writer, run.fg)?;
         write_sgr_bg(writer, run.bg)?;
         write_sgr_modifier(writer, run.modifier)?;
-        write!(
-            writer,
-            "\x1b]8;;{}\x1b\\",
-            run.target.as_deref().unwrap_or(&run.text)
-        )?;
+        write!(writer, "\x1b]8;;{}\x1b\\", run.target.unwrap_or(&run.text))?;
         writer.write_all(run.text.as_bytes())?;
         writer.write_all(b"\x1b]8;;\x1b\\")?;
         writer.write_all(b"\x1b[0m")?;
@@ -323,5 +350,35 @@ mod tests {
         // The URL appears twice — once inside the OSC 8 parameter, once as the
         // visible text reprinted between the open and close sequences.
         assert_eq!(s.matches("https://seaquel.app").count(), 2);
+    }
+
+    #[test]
+    fn obscured_prefix_keeps_suffix_target_without_linking_popup_text() {
+        let url = "https://example.com/path";
+        let style = Style::default()
+            .fg(Color::Blue)
+            .bg(Color::Black)
+            .add_modifier(Modifier::UNDERLINED);
+        let targets = [UrlTarget {
+            x: 2,
+            y: 0,
+            text: url,
+            target: url,
+            style,
+        }];
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        paint(&mut buf, 2, 0, url, style);
+        // Even an underlined popup must not inherit the metadata destination.
+        paint(&mut buf, 2, 0, "overlay!", style.fg(Color::Red));
+        let runs = collect_with_targets(&buf, &targets);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, &url[8..]);
+        assert_eq!(runs[0].target, Some(url));
+
+        paint(&mut buf, 2, 0, "not-url!", style);
+        assert!(
+            collect_with_targets(&buf, &targets).is_empty(),
+            "replacement text with the same style must not gain a metadata link"
+        );
     }
 }
