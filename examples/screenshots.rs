@@ -102,7 +102,11 @@ fn main() -> std::io::Result<()> {
 fn save(app: &App, path: &Path) -> std::io::Result<()> {
     let backend = TestBackend::new(COLS, ROWS);
     let mut terminal = Terminal::new(backend).expect("terminal init");
-    terminal.draw(|f| ui::draw(f, app)).expect("draw frame");
+    terminal
+        .draw(|f| {
+            ui::draw(f, app);
+        })
+        .expect("draw frame");
     let svg = render_svg(terminal.backend().buffer());
     fs::write(path, svg)
 }

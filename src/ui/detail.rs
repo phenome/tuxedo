@@ -3,23 +3,31 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::theme::Theme;
 use crate::todo::Task;
+use crate::ui::hyperlinks::UrlTarget;
 use crate::ui::task_row::{due_label, due_token_style, is_url_token, url_token_style};
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render(frame: &mut Frame, area: Rect, app: &App) -> Vec<UrlTarget> {
     let theme = app.theme();
     super::fill_bg(frame, area, Style::default().bg(theme.panel));
 
     let task = app.cur_task();
-    // Wrap to the actual pane width minus 1-char left padding and 1-char
-    // safety margin on the right. Floor at 16 so a tiny pane still wraps.
-    let wrap_w = (area.width as usize).saturating_sub(2).max(16);
-    let lines = build_lines(theme, task, app.today(), wrap_w);
+    // Keep both padding cells inside even very narrow panes.
+    let wrap_w = (area.width as usize).saturating_sub(2);
+    let (lines, mut targets) = build_lines(theme, task, app.today(), wrap_w);
     let para = Paragraph::new(lines).style(Style::default().bg(theme.panel).fg(theme.fg));
     frame.render_widget(para, area);
+    targets.retain(|target| target.y < area.height);
+    for target in &mut targets {
+        target.x += area.x;
+        target.y += area.y;
+    }
+    targets
 }
 
 fn build_lines<'a>(
@@ -27,8 +35,9 @@ fn build_lines<'a>(
     task: Option<&'a Task>,
     today: &'a str,
     wrap_w: usize,
-) -> Vec<Line<'a>> {
+) -> (Vec<Line<'a>>, Vec<UrlTarget>) {
     let mut rows: Vec<Line> = Vec::new();
+    let mut targets = Vec::new();
     rows.push(line_panel(
         theme,
         vec![Span::styled(
@@ -42,7 +51,7 @@ fn build_lines<'a>(
             theme,
             vec![Span::styled(" (no task)", Style::default().fg(theme.dim))],
         ));
-        return rows;
+        return (rows, targets);
     };
 
     let priority_value = if let Some(p) = t.priority {
@@ -112,6 +121,17 @@ fn build_lines<'a>(
         ],
     ));
 
+    for (key, value) in custom_metadata(&t.raw) {
+        rows.push(line_panel(
+            theme,
+            vec![
+                Span::raw(" "),
+                Span::styled(ellipsize(key, wrap_w), Style::default().fg(theme.dim)),
+            ],
+        ));
+        append_value(&mut rows, &mut targets, value, wrap_w, theme, t.done);
+    }
+
     // Rendering notes line by line
     if !t.notes.is_empty() {
         rows.push(line_panel(
@@ -167,7 +187,7 @@ fn build_lines<'a>(
         }
         rows.push(line_panel(theme, spans));
     }
-    rows
+    (rows, targets)
 }
 
 #[derive(Default)]
@@ -247,4 +267,298 @@ fn wrap_words(s: &str, width: usize) -> Vec<Vec<&str>> {
         out.push(acc);
     }
     out
+}
+
+/// Read extension tokens while keeping the existing double-quoted value form
+/// together. Reserved fields already have dedicated detail/note handling.
+fn custom_metadata(mut raw: &str) -> Vec<(&str, &str)> {
+    let mut entries = Vec::new();
+    while !raw.is_empty() {
+        raw = raw.trim_start();
+        let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
+        let token = &raw[..end];
+        let Some((key, initial)) = token.split_once(':') else {
+            raw = &raw[end..];
+            continue;
+        };
+        let (value, consumed) = if let Some(quoted) = raw[key.len() + 1..].strip_prefix('"') {
+            if let Some(close) = quoted.find('"') {
+                (&quoted[..close], key.len() + 2 + close + 1)
+            } else {
+                (initial, end)
+            }
+        } else {
+            (initial, end)
+        };
+        if crate::todo::is_valid_key(key)
+            && !value.is_empty()
+            && !is_url_token(token)
+            && !["due", "rec", "t", "note"]
+                .iter()
+                .any(|reserved| key.eq_ignore_ascii_case(reserved))
+        {
+            entries.push((key, value));
+        }
+        raw = &raw[consumed..];
+    }
+    entries
+}
+
+fn ellipsize(label: &str, width: usize) -> String {
+    if label.width() <= width {
+        return label.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut used = 0;
+    for grapheme in label.graphemes(true) {
+        let next = grapheme.width();
+        if used + next > width - 1 {
+            break;
+        }
+        result.push_str(grapheme);
+        used += next;
+    }
+    result.push('…');
+    result
+}
+
+fn append_value<'a>(
+    rows: &mut Vec<Line<'a>>,
+    targets: &mut Vec<UrlTarget>,
+    value: &'a str,
+    width: usize,
+    theme: &Theme,
+    done: bool,
+) {
+    if width == 0 {
+        return;
+    }
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 0;
+    for word in value.split_whitespace() {
+        if used > 0 {
+            if used + 1 + word.width() > width {
+                rows.push(line_panel(
+                    theme,
+                    std::mem::replace(&mut spans, vec![Span::raw(" ")]),
+                ));
+                used = 0;
+            } else {
+                spans.push(Span::raw(" "));
+                used += 1;
+            }
+        }
+        let link = is_url_token(word);
+        let style = if link {
+            url_token_style(done, theme)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        let mut start = 0;
+        let mut fragment_width = 0;
+        for (offset, grapheme) in word.grapheme_indices(true) {
+            let cells = grapheme.width();
+            if cells > width {
+                // A two-cell grapheme cannot fit a one-cell pane.
+                if offset > start {
+                    push_fragment(
+                        &mut spans,
+                        targets,
+                        &word[start..offset],
+                        word,
+                        link,
+                        style,
+                        used,
+                        rows.len(),
+                    );
+                }
+                if used + fragment_width > 0 {
+                    rows.push(line_panel(
+                        theme,
+                        std::mem::replace(&mut spans, vec![Span::raw(" ")]),
+                    ));
+                }
+                push_fragment(&mut spans, targets, "…", word, link, style, 0, rows.len());
+                used = 1;
+                start = offset + grapheme.len();
+                fragment_width = 0;
+                continue;
+            }
+            if used + fragment_width + cells > width {
+                let fragment = &word[start..offset];
+                push_fragment(
+                    &mut spans,
+                    targets,
+                    fragment,
+                    word,
+                    link,
+                    style,
+                    used,
+                    rows.len(),
+                );
+                rows.push(line_panel(
+                    theme,
+                    std::mem::replace(&mut spans, vec![Span::raw(" ")]),
+                ));
+                used = 0;
+                start = offset;
+                fragment_width = 0;
+            }
+            fragment_width += cells;
+        }
+        let fragment = &word[start..];
+        push_fragment(
+            &mut spans,
+            targets,
+            fragment,
+            word,
+            link,
+            style,
+            used,
+            rows.len(),
+        );
+        used += fragment_width;
+    }
+    if spans.len() > 1 {
+        rows.push(line_panel(theme, spans));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_fragment<'a>(
+    spans: &mut Vec<Span<'a>>,
+    targets: &mut Vec<UrlTarget>,
+    fragment: &'a str,
+    word: &str,
+    link: bool,
+    style: Style,
+    used: usize,
+    row: usize,
+) {
+    if fragment.is_empty() {
+        return;
+    }
+    if link {
+        targets.push(UrlTarget {
+            x: (used + 1) as u16,
+            y: row as u16,
+            text: fragment.to_owned(),
+            target: word.to_owned(),
+        });
+    }
+    spans.push(Span::styled(fragment, style));
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::ui::hyperlinks;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn metadata_preserves_quoted_values_and_excludes_builtins_and_urls() {
+        assert_eq!(
+            custom_metadata(
+                r#"Task due:2026-10-28 rec:1w t:2026-10-01 note:"a note owner:wrong" owner:alice link:https://example.com summary:"many words here" https://standalone.test Note:path empty: bad.key:value"#
+            ),
+            vec![
+                ("owner", "alice"),
+                ("link", "https://example.com"),
+                ("summary", "many words here")
+            ]
+        );
+    }
+
+    #[test]
+    fn labels_fit_cell_width_without_splitting_graphemes() {
+        for width in 0..12 {
+            let label = ellipsize("e\u{301}界👩‍💻long", width);
+            assert!(label.width() <= width);
+            if width > 0 && width < "e\u{301}界👩‍💻long".width() {
+                assert!(label.ends_with('…'));
+            }
+        }
+        assert_eq!(ellipsize("e\u{301}long", 2), "e\u{301}…");
+        assert_eq!(ellipsize("short", 5), "short");
+    }
+
+    #[test]
+    fn values_wrap_without_losing_text_even_in_narrow_panes() {
+        let app = App::new(
+            "/tmp/tuxedo-detail-unit.txt".into(),
+            "Task".into(),
+            "2026-10-28".into(),
+            Config::default(),
+        );
+        for width in 1..12 {
+            let mut rows = Vec::new();
+            let mut targets = Vec::new();
+            append_value(
+                &mut rows,
+                &mut targets,
+                "alpha beta verylongword",
+                width,
+                app.theme(),
+                false,
+            );
+            let text: String = rows
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+                .collect();
+            assert_eq!(
+                text.split_whitespace().collect::<String>(),
+                "alphabetaverylongword"
+            );
+            assert!(rows.iter().all(|line| line.width() <= width + 1));
+        }
+        let mut rows = Vec::new();
+        append_value(&mut rows, &mut Vec::new(), "界a", 1, app.theme(), false);
+        assert!(rows.iter().all(|line| line.width() <= 2));
+    }
+
+    #[test]
+    fn real_draw_links_every_wrapped_fragment_to_the_full_url() {
+        let url = "https://example.com/a/long/path/that/must/wrap";
+        let mut app = App::new(
+            "/tmp/tuxedo-detail-links.txt".into(),
+            format!("Task owner:alice link:{url}"),
+            "2026-10-28".into(),
+            Config::default(),
+        );
+        app.prefs.layout.right = true;
+        let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        let mut runs = Vec::new();
+        terminal
+            .draw(|frame| runs = crate::ui::draw(frame, &app))
+            .unwrap();
+        let fragments: Vec<_> = runs
+            .iter()
+            .filter(|run| run.target.as_deref() == Some(url))
+            .collect();
+        assert!(fragments.len() >= 2);
+        assert_eq!(
+            fragments
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            url
+        );
+        let mut bytes = Vec::new();
+        hyperlinks::emit_overlay(&mut bytes, &runs).unwrap();
+        let output = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            output.matches(&format!("\x1b]8;;{url}\x1b\\")).count(),
+            fragments.len()
+        );
+        let buffer = terminal.backend().buffer();
+        let visible: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(visible.contains("owner"));
+        assert!(visible.contains("alice"));
+        assert!(visible.contains("link"));
+    }
 }

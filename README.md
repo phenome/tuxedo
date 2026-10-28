@@ -438,6 +438,12 @@ The modal keys below apply in Normal mode:
 | `o` | open the current task's existing `note:<path>` in `$VISUAL` / `$EDITOR` |
 | `O` | create the current task's note if needed, then open it |
 
+The editor is selected from `$VISUAL`, then `$EDITOR`, falling back to `nvim`.
+Commands may include arguments and quoted paths, for example
+`EDITOR='omarchy-launch-editor --inline'` or `VISUAL='"/path/to/my editor" --wait'`.
+The note path is appended as one argument. Editors are launched directly, not
+through a shell: shell expansion, pipelines, and redirection are not supported.
+
 While a `+project` or `@context` filter is active, `n` seeds the add prompt
 with the matching tags so a task added under a filter stays in view —
 backspace to drop them. A `/`-search filter seeds nothing.
@@ -488,6 +494,10 @@ Standard [todo.txt](https://github.com/todotxt/todo.txt) lines:
   note actions (`o` / `O`): relative paths resolve under `notes_dir`, then
   `$NOTES_DIR`, then `~/notes`. Keys you'd rather not see can be hidden from
   the rows via [`hide_keys`](#hiding-keyvalue-tags)
+  Custom extensions also appear in the detail pane as plain-text labels and
+  wrapped values, including `key:"values with spaces"`. Long labels are
+  ellipsized. HTTP(S) URLs such as `link:https://example.com` are clickable
+  in terminals supporting OSC 8, even when wrapped across lines.
 - `due:` in the `/`-search box also accepts a range, using the same offset
   grammar as `rec:` and `t:`: `due:+1w` matches anything due between today
   and 7 days from now, `due:-3d` matches anything due between 3 days ago and
@@ -657,9 +667,9 @@ hide_keys = uid, sync
 ```
 
 Matching is case-insensitive. Hiding is purely visual — the tags stay on
-disk untouched, still serialize, and still show in the detail pane's **RAW**
-section (a deliberate escape hatch). Searches still match hidden text; the
-hidden characters just aren't drawn.
+disk untouched, still serialize, and still show in the detail pane's custom
+metadata and **RAW** sections (a deliberate escape hatch). Searches still
+match hidden text; the hidden characters just aren't drawn in task rows.
 
 ## Development
 

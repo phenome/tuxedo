@@ -1465,7 +1465,11 @@ mod tests {
         let app = build_insert_app("plain\n", &draft);
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let buf = terminal.backend().buffer();
         // Dialog is 8 rows tall, centered in a 30-row area; input lives on
         // the second inner row (top border + 1 row padding + input).
@@ -1486,7 +1490,11 @@ mod tests {
         let app = build_insert_app("plain\n", "(A) Buy milk");
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let text = dialog_inner_text(terminal.backend().buffer());
         assert!(text.contains("ok"), "preview should say 'ok'\n{text}");
         assert!(
@@ -1500,7 +1508,11 @@ mod tests {
         let app = build_insert_app("plain\n", "");
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let text = dialog_inner_text(terminal.backend().buffer());
         // No "ok" or "err" badge when draft is empty.
         assert!(
@@ -1521,7 +1533,11 @@ mod tests {
         );
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let popup = popup_region_text(terminal.backend().buffer());
         assert!(
             popup.contains("health"),
@@ -1537,7 +1553,11 @@ mod tests {
         let app = build_insert_app("(A) 2026-05-01 a +uniqueprojname\n", "plain text");
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let popup = popup_region_text(terminal.backend().buffer());
         assert!(
             !popup.contains("uniqueprojname"),
@@ -1550,7 +1570,11 @@ mod tests {
         let app = build_insert_app("(A) 2026-05-01 a +uniqueprojname @uniquecontext\n", "Foo @");
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let popup = popup_region_text(terminal.backend().buffer());
         assert!(
             popup.contains("uniquecontext"),
@@ -1606,7 +1630,11 @@ mod tests {
         );
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let popup = prompt_popup_region_text(terminal.backend().buffer());
         assert!(
             popup.contains("health"),
@@ -1627,7 +1655,11 @@ mod tests {
         );
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::ui::draw(f, &app);
+            })
+            .unwrap();
         let popup = prompt_popup_region_text(terminal.backend().buffer());
         assert!(
             popup.contains("health"),

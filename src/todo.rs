@@ -207,7 +207,7 @@ fn find_quoted_kv(s: &str, key: &str) -> Vec<String> {
     rest[..end].split(". ").map(str::to_owned).collect()
 }
 
-fn is_valid_key(k: &str) -> bool {
+pub(crate) fn is_valid_key(k: &str) -> bool {
     let mut chars = k.chars();
     let Some(first) = chars.next() else {
         return false;

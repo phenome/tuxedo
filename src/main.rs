@@ -211,10 +211,8 @@ fn run(
             // keeps cell symbols byte-identical to a plain render, so
             // ratatui's diff width calculation doesn't skip cells past the
             // URL — see `ui::hyperlinks` for the full explanation.
-            let runs = {
-                let frame = terminal.draw(|f| ui::draw(f, app))?;
-                hyperlinks::collect(frame.buffer)
-            };
+            let mut runs = Vec::new();
+            terminal.draw(|f| runs = ui::draw(f, app))?;
             if !runs.is_empty() {
                 let backend = terminal.backend_mut();
                 hyperlinks::emit_overlay(backend, &runs)?;
@@ -293,13 +291,21 @@ fn poll_config_reload(app: &mut App, rx: &Option<mpsc::Receiver<()>>) -> bool {
     }
 }
 
+fn editor_command(editor: &str, path: &std::path::Path) -> Result<std::process::Command> {
+    let words = shlex::split(editor).context("invalid quoting in editor command")?;
+    let (program, args) = words.split_first().context("editor command is empty")?;
+    let mut command = std::process::Command::new(program);
+    command.args(args).arg(path);
+    Ok(command)
+}
+
 fn open_path_in_editor(path: &std::path::Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "nvim".to_string());
+    let mut command = editor_command(&editor, path)?;
     ratatui::restore();
-    let status = std::process::Command::new(&editor)
-        .arg(path)
+    let status = command
         .status()
         .with_context(|| format!("failed to launch editor `{editor}`"));
     ratatui::crossterm::terminal::enable_raw_mode()?;
@@ -1417,6 +1423,34 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tuxedo::app::Sort;
     use tuxedo::config::Config;
+
+    #[test]
+    fn editor_preserves_quoted_arguments_and_separate_note_path() {
+        let path = std::path::Path::new("/tmp/my notes/task.md");
+        let command = editor_command(r#""/opt/my editor" --wait "two words" "$HOME;echo""#, path)
+            .expect("valid quoted editor");
+        assert_eq!(command.get_program(), "/opt/my editor");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--wait", "two words", "$HOME;echo", "/tmp/my notes/task.md"]
+        );
+        let command =
+            editor_command("omarchy-launch-editor --inline", path).expect("valid editor arguments");
+        assert_eq!(command.get_program(), "omarchy-launch-editor");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--inline", "/tmp/my notes/task.md"]
+        );
+        assert_eq!(
+            editor_command("nvim", path)
+                .expect("valid executable")
+                .get_program(),
+            "nvim"
+        );
+        for invalid in ["", "   ", "'unterminated"] {
+            assert!(editor_command(invalid, path).is_err());
+        }
+    }
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)

@@ -66,7 +66,11 @@ fn make_app() -> App {
 fn render(app: &App) -> Buffer {
     let backend = TestBackend::new(COLS, ROWS);
     let mut terminal = Terminal::new(backend).expect("terminal init");
-    terminal.draw(|f| ui::draw(f, app)).expect("draw frame");
+    terminal
+        .draw(|f| {
+            ui::draw(f, app);
+        })
+        .expect("draw frame");
     terminal.backend().buffer().clone()
 }
 
@@ -474,7 +478,11 @@ fn welcome_overlay_hides_empty_state_card() {
 
     let backend = TestBackend::new(160, 32);
     let mut terminal = Terminal::new(backend).expect("terminal init");
-    terminal.draw(|f| ui::draw(f, &app)).expect("draw frame");
+    terminal
+        .draw(|f| {
+            ui::draw(f, &app);
+        })
+        .expect("draw frame");
     let text = buffer_to_text(terminal.backend().buffer());
 
     assert!(text.contains("no todo.txt in this folder yet"));
@@ -502,7 +510,11 @@ fn many_tasks_body(n: usize) -> String {
 fn render_text(app: &App, cols: u16, rows: u16) -> String {
     let backend = TestBackend::new(cols, rows);
     let mut terminal = Terminal::new(backend).expect("terminal init");
-    terminal.draw(|f| ui::draw(f, app)).expect("draw frame");
+    terminal
+        .draw(|f| {
+            ui::draw(f, app);
+        })
+        .expect("draw frame");
     buffer_to_text(terminal.backend().buffer())
 }
 

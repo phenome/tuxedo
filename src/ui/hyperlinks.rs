@@ -27,9 +27,33 @@ pub struct UrlRun {
     pub x: u16,
     pub y: u16,
     pub text: String,
+    pub target: Option<String>,
     pub fg: Color,
     pub bg: Color,
     pub modifier: Modifier,
+}
+
+/// Full URL associated with a displayed (possibly wrapped) fragment.
+pub struct UrlTarget {
+    pub x: u16,
+    pub y: u16,
+    pub text: String,
+    pub target: String,
+}
+
+/// Resolve explicit fragment targets only when the final buffer still contains
+/// that fragment. A dialog painted over the detail pane must not gain its links.
+pub fn collect_with_targets(buf: &Buffer, targets: &[UrlTarget]) -> Vec<UrlRun> {
+    let mut runs = collect(buf);
+    for run in &mut runs {
+        if let Some(target) = targets
+            .iter()
+            .find(|target| target.x == run.x && target.y == run.y && target.text == run.text)
+        {
+            run.target = Some(target.target.clone());
+        }
+    }
+    runs
 }
 
 /// Scan `buf` for horizontal runs of cells carrying [`Modifier::UNDERLINED`].
@@ -71,6 +95,7 @@ pub fn collect(buf: &Buffer) -> Vec<UrlRun> {
             runs.push(UrlRun {
                 x: start,
                 y,
+                target: None,
                 text,
                 fg,
                 bg,
@@ -94,7 +119,11 @@ pub fn emit_overlay<W: Write>(writer: &mut W, runs: &[UrlRun]) -> io::Result<()>
         write_sgr_fg(writer, run.fg)?;
         write_sgr_bg(writer, run.bg)?;
         write_sgr_modifier(writer, run.modifier)?;
-        write!(writer, "\x1b]8;;{}\x1b\\", run.text)?;
+        write!(
+            writer,
+            "\x1b]8;;{}\x1b\\",
+            run.target.as_deref().unwrap_or(&run.text)
+        )?;
         writer.write_all(run.text.as_bytes())?;
         writer.write_all(b"\x1b]8;;\x1b\\")?;
         writer.write_all(b"\x1b[0m")?;
@@ -236,6 +265,7 @@ mod tests {
             x: 4,
             y: 2,
             text: "https://example.com".to_string(),
+            target: None,
             fg: Color::Rgb(0x8a, 0xa9, 0xc9),
             bg: Color::Reset,
             modifier: Modifier::UNDERLINED,

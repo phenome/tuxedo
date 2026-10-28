@@ -131,6 +131,7 @@ jobs:
 
   update-tap:
     name: Update Homebrew tap
+    if: github.repository == 'webstonehq/tuxedo'
     needs: release
     runs-on: ubuntu-latest
     # Touches only webstonehq/homebrew-tap, authenticated with HOMEBREW_TAP_TOKEN.

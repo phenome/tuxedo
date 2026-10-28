@@ -46,7 +46,7 @@ const PALETTE_MAX_H: u16 = 20;
 const PALETTE_MIN_W: u16 = 50;
 const PALETTE_MAX_W: u16 = 80;
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &App) -> Vec<hyperlinks::UrlRun> {
     let theme = app.theme();
     let area = frame.area();
 
@@ -90,9 +90,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         View::List => list::render(frame, center_area, app),
         View::Archive => archive::render(frame, center_area, app),
     }
-    if let Some(ra) = right_area {
-        detail::render(frame, ra, app);
-    }
+    let targets = right_area
+        .map(|ra| detail::render(frame, ra, app))
+        .unwrap_or_default();
 
     if app.prefs.layout.status_bar {
         if app.mode == Mode::Search {
@@ -178,6 +178,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // OSC 8 hyperlinks are applied post-draw by the caller (see
     // `hyperlinks::collect` + `emit_overlay`). Doing it inside the buffer
     // breaks ratatui's diff width calculation — keep cell symbols pristine.
+    hyperlinks::collect_with_targets(frame.buffer_mut(), &targets)
 }
 
 pub(crate) fn centered_in(parent: Rect, w: u16, h: u16) -> Rect {
